@@ -60,7 +60,7 @@ class MBRL_solver(nn.Module):
                  critic_max_iterations_per_epoch, critic_loss_threshold,
                  critic_batch_size, action_range, z_range, noise_dim, nprocs, comm, device,
                  actor_logstd_bounds=[-5, 5], actor_hidden_dim=64, actor_hidden_layers=3, critic_hidden_dim=64, 
-                 critic_hidden_layers=3, critic_tau=0.005, actor_lr=1e-4, critic_lr=1e-4, actor_betas=[0.9, 0.999], 
+                 critic_hidden_layers=3, tau=0.005, actor_lr=1e-4, critic_lr=1e-4, actor_betas=[0.9, 0.999], 
                  critic_betas=[0.9, 0.999], capacity=1e5,
                  gamma=0.99, alpha=0.1):
         super().__init__()
@@ -80,7 +80,7 @@ class MBRL_solver(nn.Module):
         self.actor_hidden_layers = actor_hidden_layers
         self.critic_hidden_dim = critic_hidden_dim
         self.critic_hidden_layers = critic_hidden_layers
-        self.critic_tau = critic_tau
+        self.tau = tau
         self.actor_lr = actor_lr
         self.critic_lr = critic_lr
         self.actor_betas = actor_betas
@@ -103,11 +103,15 @@ class MBRL_solver(nn.Module):
         self.device = device
 
         self.actor = DiagGaussianActor(self.obs_dim, self.action_dim, self.actor_hidden_dim, self.actor_hidden_layers, self.actor_logstd_bounds).to(self.device)
+        self.target_actor = DiagGaussianActor(self.obs_dim, self.action_dim, self.actor_hidden_dim, self.actor_hidden_layers, self.actor_logstd_bounds).to(self.device)
+        self.actor_target.load_state_dict(self.actor.state_dict())
+        self.actor_target.requires_grad = False
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=self.actor_lr, betas=self.actor_betas)
 
         self.critic = DoubleQCritic(self.obs_dim, self.action_dim, self.critic_hidden_dim, self.critic_hidden_layers).to(self.device)
         self.critic_target = DoubleQCritic(self.obs_dim, self.action_dim, self.critic_hidden_dim, self.critic_hidden_layers).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
+        self.critic_target.requires_grad = False
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=self.critic_lr, betas=self.critic_betas)
 
         self.log_alpha = torch.tensor(np.log(alpha)).to(self.device)
@@ -138,9 +142,9 @@ class MBRL_solver(nn.Module):
     def update_critic(self):
         obs, action, reward, next_obs, not_done, _ = self.replay_buffer.sample(self.critic_batch_size)
 
-        dist = self.actor(next_obs)
+        dist = self.actor_target(next_obs)
 
-        next_action = dist.rsample()
+        next_action = dist.sample()
         log_prob = dist.log_prob(next_action).sum(-1, keepdim=True)
 
         target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
@@ -154,10 +158,10 @@ class MBRL_solver(nn.Module):
         # Optimize the critic
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 5.0)
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 50.0)
         self.critic_optimizer.step()
 
-        return critic_loss.detach().cpu().numpy()
+        return critic_loss.detach()
 
     def update_alpha(self, total_log_probs):
         self.log_alpha_optimizer.zero_grad()
@@ -303,7 +307,8 @@ class MBRL_solver(nn.Module):
                 critic_losses = self.update_critic()
                 critic_itrs += 1
 
-            utils.soft_update_params(self.critic, self.critic_target, self.critic_tau)
+            utils.soft_update_params(self.critic, self.critic_target, self.tau)
+            utils.soft_update_params(self.actor, self.actor_target, self.tau)
 
             actor_values, total_log_probs, _, _, _, _, _ = self._solve_once(network, dataset_states)
             actor_values = torch.stack(actor_values, dim=0)
@@ -464,7 +469,7 @@ class MBRL_solver(nn.Module):
         sd = {
             'actor': self.actor.state_dict(),
             'critic': self.critic.state_dict(),
-            'log_alpha': self.log_alpha,
+            'log_alpha': self.log_alpha.data,
             'actor_optim': self.actor_optimizer.state_dict(),
             'critic_optim': self.critic_optimizer.state_dict(),
             'alpha_optim': self.log_alpha_optimizer.state_dict()
@@ -475,7 +480,8 @@ class MBRL_solver(nn.Module):
         all_dict = torch.load(PATH)
         self.actor.load_state_dict(all_dict['actor'])
         self.critic.load_state_dict(all_dict['critic'])
-        self.log_alpha = all_dict['log_alpha']
+        self.critic_target.load_state_dict(all_dict['critic'])
+        self.log_alpha.data = all_dict['log_alpha']
         self.actor_optimizer.load_state_dict(all_dict['actor_optim'])
         self.critic_optimizer.load_state_dict(all_dict['critic_optim'])
         self.log_alpha_optimizer.load_state_dict(all_dict['alpha_optim'])
