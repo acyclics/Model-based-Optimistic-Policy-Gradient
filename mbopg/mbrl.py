@@ -11,7 +11,7 @@ from copy import deepcopy
 from time import time
 
 import mbopg.utils as utils
-from mbopg.actor_algo4 import SacDiagGaussianActor
+from mbopg.actor_algo6 import SacDiagGaussianActor
 from mbopg.critic import DoubleQCritic
 from mbopg.replay import ReplayBuffer
 
@@ -172,7 +172,6 @@ class MBRL_solver(nn.Module):
                 initial_dones.append(d)
                 initial_logprob.append(lp)
 
-            obs = torch.stack(initial_obs2, dim=0)
             initial_obs = torch.stack(initial_obs1, dim=0)
             initial_obs2 = torch.stack(initial_obs2, dim=0)
             initial_act = torch.stack(initial_act, dim=0)
@@ -180,7 +179,7 @@ class MBRL_solver(nn.Module):
             initial_dones = torch.stack(initial_dones, dim=0)
             initial_logprob = torch.stack(initial_logprob, dim=0)
 
-            return obs, initial_obs, initial_obs2, initial_act, initial_rewards, initial_dones, initial_logprob
+            return initial_obs, initial_obs2, initial_act, initial_rewards, initial_dones, initial_logprob
 
     def _rollout(self, network, obs):
         states = []
@@ -233,34 +232,46 @@ class MBRL_solver(nn.Module):
 
         return states, actions, act_log_probs, noise_log_probs, total_log_probs, rewards, dones, next_obs, next_action, next_act_log_prob, next_noise, next_noise_log_prob
 
-    def _train_critic(self, data, rollout):
-        obs, initial_obs, initial_obs2, initial_act, initial_rewards, initial_dones, initial_logprob = data
-        states, actions, act_log_probs, noise_log_probs, total_log_probs, rewards, dones, next_obs, next_action, next_act_log_prob, next_noise, next_noise_log_prob = rollout
+    def _train_critic(self, data, rollout1, rollout2):
+        initial_obs, initial_obs2, initial_act, initial_rewards, initial_dones, initial_logprob = data
+        states1, actions1, act_log_probs1, _, _, rewards1, dones1, next_obs1, next_action1, next_act_log_prob1, _, _ = rollout1
+        states2, actions2, act_log_probs2, _, _, rewards2, dones2, next_obs2, next_action2, next_act_log_prob2, _, _ = rollout2
 
         critic_loss1, critic_loss2 = [], []
-        target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
-        target_V = torch.min(target_Q1, target_Q2)
-        return_expansion = target_V.detach() - self.alpha.detach() * next_act_log_prob.unsqueeze(dim=-1)
-        
-        for t in reversed(range(len(rewards))):
-            return_expansion = rewards[t].unsqueeze(dim=-1) - self.alpha.detach() * act_log_probs[t].unsqueeze(dim=-1) + (1.0 - dones[t].unsqueeze(dim=-1)) * self.gamma * return_expansion
-    
-        act_dist, noise_dist = self.actor(initial_obs)
-        next_initial_action = act_dist.rsample()
-        next_initial_log_prob = act_dist.log_prob(next_initial_action).sum(-1, keepdim=True)
-        target_Q = initial_rewards - self.alpha.detach() * next_initial_log_prob + (1 - initial_dones) * self.gamma * return_expansion
-        target_Q = target_Q.detach()
-        current_Q1, current_Q2 = self.critic(initial_obs, initial_act)
-        err1 = (current_Q1 - target_Q).pow(2)
-        err2 = (current_Q2 - target_Q).pow(2)
+
+        target_Q1, target_Q2 = self.critic_target(next_obs1.detach(), next_action1.detach())
+        target_V1 = torch.min(target_Q1, target_Q2)
+        return_expansion1 = target_V1.detach() - self.alpha.detach() * next_act_log_prob1.unsqueeze(dim=-1)
+        for t in reversed(range(len(rewards1))):
+            return_expansion1 = rewards1[t].unsqueeze(dim=-1) - self.alpha.detach() * act_log_probs1[t].unsqueeze(dim=-1) + (1.0 - dones1[t].unsqueeze(dim=-1)) * self.gamma * return_expansion1
+        return_expansion1 = return_expansion1.detach()
+
+        actions = torch.stack(actions1, dim=1)[:, 0].detach()
+        current_Q1, current_Q2 = self.critic(initial_obs, actions)
+        err1 = (current_Q1 - return_expansion1).pow(2)
+        err2 = (current_Q2 - return_expansion1).pow(2)
         critic_loss1.append(err1)
         critic_loss2.append(err2)
 
-        critic_loss1 = torch.stack(critic_loss1, dim=1)
-        critic_loss1 = torch.mean(critic_loss1, dim=1)
-        critic_loss2 = torch.stack(critic_loss2, dim=1)
-        critic_loss2 = torch.mean(critic_loss2, dim=1)
-        critic_loss = torch.mean(critic_loss1) + torch.mean(critic_loss2)
+        target_Q1, target_Q2 = self.critic_target(next_obs2.detach(), next_action2.detach())
+        target_V2 = torch.min(target_Q1, target_Q2)
+        return_expansion2 = target_V2.detach() - self.alpha.detach() * next_act_log_prob2.unsqueeze(dim=-1)
+        for t in reversed(range(len(rewards2))):
+            return_expansion2 = rewards2[t].unsqueeze(dim=-1) - self.alpha.detach() * act_log_probs2[t].unsqueeze(dim=-1) + (1.0 - dones2[t].unsqueeze(dim=-1)) * self.gamma * return_expansion2
+        return_expansion2 = initial_rewards + self.gamma * (1 - initial_dones) * return_expansion2
+        return_expansion2 = return_expansion2.detach()
+
+        current_Q1, current_Q2 = self.critic(initial_obs, initial_act)
+        err1 = (current_Q1 - return_expansion2).pow(2)
+        err2 = (current_Q2 - return_expansion2).pow(2)
+        critic_loss1.append(err1)
+        critic_loss2.append(err2)
+
+        critic_loss1 = torch.cat(critic_loss1, dim=0)
+        critic_loss1 = torch.mean(critic_loss1)
+        critic_loss2 = torch.cat(critic_loss2, dim=0)
+        critic_loss2 = torch.mean(critic_loss2)
+        critic_loss = critic_loss1 + critic_loss2
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
@@ -270,7 +281,7 @@ class MBRL_solver(nn.Module):
         return critic_loss
 
     def _train_actor(self, network, data, rollout):
-        obs, initial_obs, initial_obs2, initial_act, initial_rewards, initial_dones, initial_logprob = data
+        initial_obs, initial_obs2, initial_act, initial_rewards, initial_dones, initial_logprob = data
         states, actions, act_log_probs, noise_log_probs, total_log_probs, rewards, dones, next_obs, next_action, next_act_log_prob, next_noise, next_noise_log_prob = rollout
 
         noise_actor_Q1, noise_actor_Q2 = self.critic(next_obs, next_action)
@@ -280,12 +291,11 @@ class MBRL_solver(nn.Module):
         for t in reversed(range(len(rewards))):
             noise_return_expansion = rewards[t].unsqueeze(dim=-1) + (1.0 - dones[t].unsqueeze(dim=-1)) * self.gamma * noise_return_expansion
 
-        noise_return_expansion = initial_rewards + self.gamma * (1 - initial_dones) * noise_return_expansion
         noise_actor_loss = -noise_return_expansion.mean()
 
-        all_states = torch.cat(states, dim=0)
-        all_states = torch.cat([initial_obs, all_states, next_obs], dim=0)
-        all_states = all_states.detach()
+        #all_states = torch.cat(states, dim=0)
+        #all_states = torch.cat([initial_obs, all_states, next_obs], dim=0)
+        all_states = initial_obs#all_states.detach()
         act_dist, noise_dist = self.actor(all_states)
         action = act_dist.rsample()
         log_prob = act_dist.log_prob(action).sum(-1, keepdim=True)
@@ -319,14 +329,15 @@ class MBRL_solver(nn.Module):
     def _solve(self, network, dataset_states, dataset_actions, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob, verbose=True):
         for epoch in range(self.epochs):
             data = self._get_initial_data(dataset_states, dataset_actions, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob)            
-            rollout = self._rollout(network, data[0])
+            rollout1 = self._rollout(network, data[0])
+            rollout2 = self._rollout(network, data[1])
 
-            critic_loss = self._train_critic(data, rollout)
+            critic_loss = self._train_critic(data, rollout1, rollout2)
             
             if (epoch + 1) % self.target_update_frequency == 0:
                 utils.soft_update_params(self.critic, self.critic_target, self.tau)
 
-                actor_loss = self._train_actor(network, data, rollout)
+                actor_loss = self._train_actor(network, data, rollout1)
 
                 if verbose:
                     print(f"Iteration {epoch} ; Actor value = {-actor_loss} ; Critic loss = {critic_loss}")
