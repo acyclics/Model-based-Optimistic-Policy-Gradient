@@ -64,7 +64,7 @@ class SacDiagGaussianActor(nn.Module):
         self.log_std_bounds = log_std_bounds
         self.trunk_act = utils.mlp(obs_dim, hidden_dim, 2 * (action_dim - noise_dim),
                                hidden_depth)
-        self.trunk_noise = utils.mlp(obs_dim, hidden_dim, 2 * noise_dim,
+        self.trunk_noise = utils.mlp(obs_dim, hidden_dim, noise_dim,
                                hidden_depth)
 
         self.outputs = dict()
@@ -72,19 +72,19 @@ class SacDiagGaussianActor(nn.Module):
 
     def forward(self, obs):
         act_mu, act_log_std = self.trunk_act(obs).chunk(2, dim=-1)
-        noise_mu, noise_log_std = self.trunk_noise(obs).chunk(2, dim=-1)
+        noise_mu = self.trunk_noise(obs)
 
         # constrain log_std inside [log_std_min, log_std_max]
         act_log_std = torch.tanh(act_log_std)
         act_log_std_min, act_log_std_max = self.log_std_bounds
         act_log_std = act_log_std_min + 0.5 * (act_log_std_max - act_log_std_min) * (act_log_std + 1)
 
-        noise_log_std = torch.tanh(noise_log_std)
-        noise_log_std_min, noise_log_std_max = self.log_std_bounds
-        noise_log_std = noise_log_std_min + 0.5 * (noise_log_std_max - noise_log_std_min) * (noise_log_std + 1)
+        #noise_log_std = torch.tanh(noise_log_std)
+        #noise_log_std_min, noise_log_std_max = self.log_std_bounds
+        #noise_log_std = noise_log_std_min + 0.5 * (noise_log_std_max - noise_log_std_min) * (noise_log_std + 1)
 
         act_std = act_log_std.exp()
-        noise_std = noise_log_std.exp()
+        noise_std = 0.1
 
         act_dist = SquashedNormal(act_mu, act_std)
         noise_dist = SquashedNormal(noise_mu, noise_std)

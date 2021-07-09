@@ -6,8 +6,8 @@ import torch
 import numpy as np
 
 
-def log_statistics(T, eval_env, policy, metrics, results_dir, evaluation_episodes, evaluate=False):
-    metrics['steps'].append(T)
+def log_rewards(T, eval_env, policy, metrics, results_dir, evaluation_episodes, evaluate=False):
+    metrics['steps_rewards'].append(T)
     T_rewards = []
 
     # Test performance over several episodes
@@ -18,7 +18,7 @@ def log_statistics(T, eval_env, policy, metrics, results_dir, evaluation_episode
             if done:
                 state, reward_sum, done = eval_env.reset(), 0, False
 
-            action = policy.act(state, sample=True)  # Choose an action ε-greedily
+            action = policy.eval_act(state, sample=True)  # Choose an action ε-greedily
             state, reward, done, info = eval_env.step(action)  # Step
             reward_sum += reward
 
@@ -33,10 +33,17 @@ def log_statistics(T, eval_env, policy, metrics, results_dir, evaluation_episode
         metrics['rewards'].append(T_rewards)
         torch.save(metrics, os.path.join(results_dir, 'metrics.pth'))
         # Plot
-        _plot_line(metrics['steps'], metrics['rewards'], 'Reward', path=results_dir)
+        _plot_line(metrics['steps_rewards'], metrics['rewards'], 'Reward', path=results_dir)
 
     # Return average reward and Q-value
     return avg_reward
+
+
+def log_likelihood(T, metrics, results_dir, llh):
+    metrics['steps_likelihood'].append(T)
+    metrics['likelihood'].append([-llh])
+    torch.save(metrics, os.path.join(results_dir, 'metrics.pth'))
+    _plot_line(metrics['steps_likelihood'], metrics['likelihood'], 'Likelihood', path=results_dir)
 
 
 # Plots min, max and mean + standard deviation bars of a population over time

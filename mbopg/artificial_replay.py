@@ -9,7 +9,7 @@ class ArtificialReplayBuffer(object):
         self.device = device
 
         # the proprioceptive obs is stored as float32, pixels obs as uint8
-        obs_dtype = torch.float32 if len(obs_shape) == 1 else torch.uint8
+        obs_dtype = torch.float32
 
         self.obses = torch.empty((capacity, *obs_shape), dtype=obs_dtype, device=device)
         self.next_obses = torch.empty((capacity, *obs_shape), dtype=obs_dtype, device=device)
@@ -25,16 +25,35 @@ class ArtificialReplayBuffer(object):
     def __len__(self):
         return self.capacity if self.full else self.idx
 
-    def add(self, obs, action, reward, next_obs, done, done_no_max):
-        self.obses[self.idx] = obs.clone()
-        self.actions[self.idx] = action.clone()
-        self.rewards[self.idx] = reward.clone()
-        self.next_obses[self.idx] = next_obs.clone()
-        self.not_dones[self.idx] = not done
-        self.not_dones_no_max[self.idx] = not done_no_max
+    def initial_add(self, obs, action, reward, next_obs, done, done_no_max):
+        idx = obs.shape[0]
+        self.obses[0:idx] = obs.clone()
+        self.actions[0:idx] = action.clone()
+        self.rewards[0:idx] = reward.clone()
+        self.next_obses[0:idx] = next_obs.clone()
+        self.not_dones[0:idx] = 1.0 - done.clone()
+        self.not_dones_no_max[0:idx] = 1.0 - done_no_max.clone()
 
-        self.idx = (self.idx + 1) % self.capacity
-        self.full = self.full or self.idx == 0
+        self.starting_idx = idx
+        self.idx = idx
+
+    def add(self, obs, action, reward, next_obs, done, done_no_max):
+        target_max_idx = self.idx + obs.shape[0]
+        max_idx = min(target_max_idx, self.capacity)
+        data_idx = target_max_idx - max_idx
+
+        self.obses[self.idx:max_idx] = obs[data_idx:].clone()
+        self.actions[self.idx:max_idx] = action[data_idx:].clone()
+        self.rewards[self.idx:max_idx] = reward[data_idx:].clone()
+        self.next_obses[self.idx:max_idx] = next_obs[data_idx:].clone()
+        self.not_dones[self.idx:max_idx] = 1.0 - done[data_idx:].clone()
+        self.not_dones_no_max[self.idx:max_idx] = 1.0 - done_no_max[data_idx:].clone()
+
+        if data_idx != 0:
+            self.idx = self.starting_idx
+            self.full = True
+        else:
+            self.idx = target_max_idx
 
     def sample(self, batch_size):
         idxs = np.random.randint(0,
