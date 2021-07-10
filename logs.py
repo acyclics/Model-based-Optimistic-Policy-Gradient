@@ -18,7 +18,7 @@ def log_rewards(T, eval_env, policy, metrics, results_dir, evaluation_episodes, 
             if done:
                 state, reward_sum, done = eval_env.reset(), 0, False
 
-            action = policy.eval_act(state, sample=True)  # Choose an action ε-greedily
+            action = policy.eval_act(state, sample=False)  # Choose an action ε-greedily
             state, reward, done, info = eval_env.step(action)  # Step
             reward_sum += reward
 

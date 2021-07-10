@@ -11,7 +11,7 @@ import gym
 import pybulletgym
 
 from mbopg.bh_mdp import Multi_SI_BayesNetwork
-from mbopg.mbrl_algo6 import MBRL_solver
+from mbopg.mbrl import MBRL_solver
 from logs import log_rewards, log_likelihood
 
 
@@ -283,7 +283,7 @@ current_state = env.reset()
 policy = mbrl_solver.make_policy(mbrl_solver.actor.state_dict())
 
 while episode_steps < args.n_explore_steps:
-    greedy_u, log_prob = policy.act(current_state, sample=True)
+    greedy_u, log_prob = policy.act(current_state, sample=False)
 
     next_state, rew, done, _ = env.step(greedy_u)
 
@@ -316,7 +316,7 @@ for loop_n in range(N_OVERALL_LOOPS):
     current_state = env.reset()
 
     while episode_steps < args.n_explore_steps:
-        greedy_u, log_prob = policy.act(current_state, sample=True)
+        greedy_u, log_prob = policy.act(current_state, sample=False)
 
         next_state, rew, done, _ = env.step(greedy_u)
 
