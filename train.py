@@ -11,7 +11,7 @@ import gym
 import pybulletgym
 
 from mbopg.bh_mdp import Multi_SI_BayesNetwork
-from mbopg.mbrl_algo4 import MBRL_solver
+from mbopg.mbrl import MBRL_solver
 from logs import log_rewards, log_likelihood
 
 
@@ -303,7 +303,7 @@ if not args.resume:
     train_network()
 
 for loop_n in range(N_OVERALL_LOOPS):
-    #mbrl_solver.reset_noise()
+    mbrl_solver.reset_noise()
     policy, critic = mbrl_solver.solve(network, dataset_state, dataset_action, dataset_rewards, dataset_next_states,
                                        dataset_dones, dataset_logprob, reset=False, verbose=True)
 
