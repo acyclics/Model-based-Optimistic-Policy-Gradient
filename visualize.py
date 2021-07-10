@@ -25,7 +25,7 @@ action_range = env.action_space.high
 print(action_dim, action_range, obs_dim)
 
 # Setup policy
-policy_file = "./experiments/agent_loop83"
+policy_file = "./experiments/agent_loop95"
 policy = Policy(None, action_range, 3, DEVICE)
 policy.load(policy_file, cpu=True)
 
@@ -40,7 +40,7 @@ for loop_n in range(N_OVERALL_LOOPS):
     #env._max_episode_steps = 10000
 
     while not done:
-        greedy_u = policy.eval_act(current_state, sample=False)
+        greedy_u = policy.eval_act(current_state, sample=True)
    
         next_state, rew, done, _ = env.step(greedy_u)
         #print(next_state)
