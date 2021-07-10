@@ -177,7 +177,6 @@ class MBRL_solver(nn.Module):
             initial_act = torch.stack(initial_act, dim=0)
             initial_rewards = torch.stack(initial_rewards, dim=0)
             initial_dones = torch.stack(initial_dones, dim=0)
-            initial_logprob = torch.stack(initial_logprob, dim=0)
 
             return initial_obs, initial_obs2, initial_act, initial_rewards, initial_dones, initial_logprob
 

@@ -161,7 +161,7 @@ def add_to_dataset(current_state, u, reward, done, next_state, log_prob, current
     r = torch.from_numpy(np.array([reward]).astype(np.float32)).to(DEVICE)
     d = torch.from_numpy(np.array([done]).astype(np.float32)).to(DEVICE)
     ns = torch.from_numpy(next_state.astype(np.float32)).to(DEVICE)
-    lp = torch.from_numpy(log_prob.astype(np.float32)).to(DEVICE)
+    lp = log_prob#torch.from_numpy(log_prob.astype(np.float32)).to(DEVICE)
 
     state_min = np.minimum(state_min, current_state.astype(np.float32))
     state_max = np.maximum(state_max, current_state.astype(np.float32))
