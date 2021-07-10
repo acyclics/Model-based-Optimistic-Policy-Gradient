@@ -11,7 +11,7 @@ from copy import deepcopy
 from time import time
 
 import mbopg.utils as utils
-from mbopg.actor_algo3 import SacDiagGaussianActor
+from mbopg.actor import SacDiagGaussianActor
 from mbopg.critic import DoubleQCritic
 from mbopg.replay import ReplayBuffer
 
