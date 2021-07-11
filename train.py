@@ -11,7 +11,7 @@ import gym
 import pybulletgym
 
 from mbopg.bh_mdp import Multi_SI_BayesNetwork
-from mbopg.mbrl_algo6 import MBRL_solver
+from mbopg.mbrl import MBRL_solver
 from logs import log_rewards, log_likelihood
 
 
