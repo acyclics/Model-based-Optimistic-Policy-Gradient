@@ -190,6 +190,8 @@ class MBRL_solver(nn.Module):
         for t in range(self.horizon):
             act_action, noise_action = self.actor(obs)
 
+            action += torch.randn_like(action) * self.act_std
+
             action = act_action * self.action_range[0:-self.noise_dim].unsqueeze(dim=0)
             z = noise_action * self.action_range[-self.noise_dim:].unsqueeze(dim=0)
 
