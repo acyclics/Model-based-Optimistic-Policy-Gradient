@@ -124,14 +124,15 @@ class MBRL_solver(nn.Module):
 
         self.device = device
         self.full_reset()
+
+        self.epochs = 0
     
     @property
     def alpha(self):
         return self.log_alpha.exp()
 
-    def solve(self, network, dataset_states, dataset_actions, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob, reset=True, verbose=True):
-        if reset:
-            self.full_reset()
+    def solve(self, network, dataset_states, dataset_actions, dataset_rewards, dataset_next_states,
+              dataset_dones, dataset_logprob, reset=True, verbose=True):
 
         self._solve(network, dataset_states, dataset_actions, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob, verbose=verbose)
 
@@ -140,7 +141,8 @@ class MBRL_solver(nn.Module):
 
         return policy, critic
     
-    def make_policy(self, policy):
+    def make_policy(self):
+        policy = self.actor.state_dict()
         actor = SacDiagGaussianActor(self.obs_dim, self.action_dim, self.noise_dim, self.actor_hidden_dim, self.actor_hidden_layers, self.actor_logstd_bounds).to(self.device)
         actor.load_state_dict(policy)
         policy = Policy(actor, self.action_range, self.noise_dim, self.device)
@@ -316,21 +318,21 @@ class MBRL_solver(nn.Module):
 
         return actor_loss
 
-    def _solve(self, network, dataset_states, dataset_actions, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob, verbose=True):
-        for epoch in range(self.epochs):
-            data = self._get_initial_data(dataset_states, dataset_actions, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob)            
-            rollout = self._rollout(network, data[0])
+    def solve_once(self, network, dataset_states, dataset_actions, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob, verbose=True):
+        data = self._get_initial_data(dataset_states, dataset_actions, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob)            
+        rollout = self._rollout(network, data[0])
+        critic_loss = self._train_critic(data, rollout)
+        
+        if (self.epochs + 1) % self.target_update_frequency == 0:
+            utils.soft_update_params(self.critic, self.critic_target, self.tau)
 
-            critic_loss = self._train_critic(data, rollout)
+            actor_loss = self._train_actor(network, data, rollout)
+
+            if verbose:
+                print(f"Iteration {self.epochs} ; Actor value = {-actor_loss} ; Critic loss = {critic_loss}")
+                sys.stdout.flush()
             
-            if (epoch + 1) % self.target_update_frequency == 0:
-                utils.soft_update_params(self.critic, self.critic_target, self.tau)
-
-                actor_loss = self._train_actor(network, data, rollout)
-
-                if verbose:
-                    print(f"Iteration {epoch} ; Actor value = {-actor_loss} ; Critic loss = {critic_loss}")
-                    sys.stdout.flush()
+        self.epochs += 1
 
     def full_reset(self):
         self.actor = SacDiagGaussianActor(self.obs_dim, self.action_dim, self.noise_dim, self.actor_hidden_dim, self.actor_hidden_layers, self.actor_logstd_bounds).to(self.device)

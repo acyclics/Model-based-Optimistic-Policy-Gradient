@@ -71,7 +71,6 @@ actor_logstd_bounds = [-2, 2]
 # Finalize
 DEVICE = 'cuda'
 args = parser.parse_args()
-N_OVERALL_LOOPS = int(args.T_max / args.n_explore_steps) - 1
 
 # Directories and metrics
 metrics = {'steps_rewards': [], 'rewards': [], 'steps_likelihood': [], 'likelihood': []}
@@ -99,6 +98,7 @@ action_range = env.action_space.high
 state_min = np.ones((obs_dim), dtype=np.float32) * 1000000.0
 state_max = np.ones((obs_dim), dtype=np.float32) * -1000000.0
 current_beta = 0.0
+total_training_steps = 0
 
 network = Multi_SI_BayesNetwork(obs_dim, action_dim, args.obs_scale, state_min, state_max,
                             args.network_h_units, args.network_h_layers,
@@ -183,7 +183,7 @@ def add_to_dataset(current_state, u, reward, done, next_state, log_prob, current
         dataset_logprob = dataset_logprob[1:]
 
 
-def train_network():
+def train_network(n_train_steps):
     global network
     global args
     global net_path
@@ -196,78 +196,58 @@ def train_network():
     global state_min
     global state_max
     global current_beta
+    global total_training_steps
 
     network.set_obs_trans(state_min, state_max)
 
-    total_training_steps = 0
     minibatch_size = min(args.network_batchsize, len(dataset_state))
-    epoch = 0
     avg_llh = 0
-    initial_llh = None
+    avg_H = 0
+    avg_err = 0
 
-    dataset = list(zip(dataset_state, dataset_action, dataset_rewards, dataset_dones, dataset_next_states))
+    for _ in range(n_train_steps):
+        mb_s = []
+        mb_a = []
+        mb_r = []
+        mb_d = []
+        mb_ns = []
 
-    while avg_llh < args.llh_threshold or epoch < args.network_epochs:
-        avg_llh = 0
-        avg_loss = 0
-        avg_H = 0
-        avg_err = 0
+        for _ in range(minibatch_size):
+            idx = np.random.randint(0, len(dataset_state))
+            mb_s.append(dataset_state[idx])
+            mb_a.append(dataset_action[idx])
+            mb_r.append(dataset_rewards[idx])
+            mb_d.append(dataset_dones[idx])
+            mb_ns.append(dataset_next_states[idx])
 
-        random.shuffle(dataset)
-        dataset_state, dataset_action, dataset_rewards, dataset_dones, dataset_next_states = zip(*dataset)
+        mb_s = torch.stack(mb_s, dim=0)
+        mb_a = torch.stack(mb_a, dim=0)
+        mb_r = torch.stack(mb_r, dim=0)
+        mb_d = torch.stack(mb_d, dim=0)
+        mb_ns = torch.stack(mb_ns, dim=0)
 
-        for idx in range(0, len(dataset_state), minibatch_size):
-            mb_s = dataset_state[idx : idx + minibatch_size]
-            mb_a = dataset_action[idx : idx + minibatch_size]
-            mb_r = dataset_rewards[idx : idx + minibatch_size]
-            mb_d = dataset_dones[idx : idx + minibatch_size]
-            mb_ns = dataset_next_states[idx : idx + minibatch_size]
+        network.K = args.K_value
+        network.J = args.J_value
 
-            mb_s = torch.stack(mb_s, dim=0)
-            mb_a = torch.stack(mb_a, dim=0)
-            mb_r = torch.stack(mb_r, dim=0)
-            mb_d = torch.stack(mb_d, dim=0)
-            mb_ns = torch.stack(mb_ns, dim=0)
-
-            network.K = args.K_value
-            network.J = args.J_value
-
-            if total_training_steps > args.beta_threshold:
-                current_beta += args.beta_stepsize
-            
-            network.beta = min(1.0, current_beta)
-            
-            loss, log_lik, log_H, err = network.train(mb_s, mb_a, mb_r, mb_d, mb_ns)
-
-            avg_llh += log_lik
-            avg_loss += loss
-            avg_H += log_H
-            avg_err += err
-            
-            total_training_steps += 1
+        if total_training_steps > args.beta_threshold:
+            current_beta += args.beta_stepsize
         
-        epoch += 1
+        network.beta = min(1.0, current_beta)
+        
+        loss, log_lik, log_H, err = network.train(mb_s, mb_a, mb_r, mb_d, mb_ns)        
+        total_training_steps += 1
+        avg_llh += log_lik
+        avg_H += log_H
+        avg_err += err
 
-        avg_llh /= (len(dataset_state) / minibatch_size)
-        avg_loss /= (len(dataset_state) / minibatch_size)
-        avg_H /= (len(dataset_state) / minibatch_size)
-        avg_err /= (len(dataset_state) / minibatch_size)
+    avg_llh = avg_llh / n_train_steps
+    avg_H = avg_H / n_train_steps
+    avg_err = avg_err / n_train_steps
 
-        if initial_llh == None:
-            initial_llh = avg_llh
+    print(f"Likelihood = {avg_llh} ; H = {avg_H} ; Err = {avg_err} ; Beta = {network.beta}")
+    sys.stdout.flush()
 
-        print(f"Epoch = {epoch} ; Average loss = {avg_loss} ; Likelihood = {avg_llh} ; H = {avg_H} ; Err = {avg_err} ; Beta = {network.beta}")
-        sys.stdout.flush()
-
-    dataset_state = list(dataset_state)
-    dataset_action = list(dataset_action)
-    dataset_rewards = list(dataset_rewards)
-    dataset_dones = list(dataset_dones)
-    dataset_next_states = list(dataset_next_states)
-
-    network.save(net_path)
-
-    return initial_llh
+    return avg_llh
 
 
 total_steps_taken = 0
@@ -280,7 +260,7 @@ sys.stdout.flush()
 episode_steps = 0
 current_steps = 0
 current_state = env.reset()
-policy = mbrl_solver.make_policy(mbrl_solver.actor.state_dict())
+policy = mbrl_solver.make_policy()
 
 while episode_steps < args.n_explore_steps:
     greedy_u, log_prob = policy.act(current_state, sample=True)
@@ -300,40 +280,31 @@ while episode_steps < args.n_explore_steps:
         current_state = env.reset()
 
 if not args.resume:
-    train_network()
+    train_network(100)
 
-for loop_n in range(N_OVERALL_LOOPS):
-    mbrl_solver.reset_noise()
-    policy, critic = mbrl_solver.solve(network, dataset_state, dataset_action, dataset_rewards, dataset_next_states,
-                                       dataset_dones, dataset_logprob, reset=False, verbose=True)
+current_steps = 0
+current_state = env.reset()
 
-    mbrl_solver.save(mbrl_path)
-    policy = mbrl_solver.make_policy(policy)
+while total_steps_taken < args.T_max:
+    greedy_u, log_prob = policy.act(current_state, sample=True)
 
-    done = False
-    episode_steps = 0
-    current_steps = 0
-    current_state = env.reset()
+    next_state, rew, done, _ = env.step(greedy_u)
 
-    while episode_steps < args.n_explore_steps:
-        greedy_u, log_prob = policy.act(current_state, sample=True)
+    current_steps += 1
+    total_steps_taken += 1
 
-        next_state, rew, done, _ = env.step(greedy_u)
+    add_to_dataset(current_state, greedy_u, rew, done, next_state, log_prob, current_steps)
+    current_state = next_state.copy()
+    initial_llh = train_network(1)
+    mbrl_solver.solve_once(network, dataset_state, dataset_action, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob, verbose=True)
 
-        current_steps += 1
-        episode_steps += 1
-        total_steps_taken += 1
-
-        add_to_dataset(current_state, greedy_u, rew, done, next_state, log_prob, current_steps)
-        current_state = next_state.copy()
-
-        if done:
-            current_steps = 0
-            current_state = env.reset()
-
-    policy.save(os.path.join(agents_dir, f"agent_loop{loop_n}"))
-    log_rewards(total_steps_taken, eval_env, policy, metrics, results_dir, args.n_eval_episodes)
-
-    args.network_epochs = min(initial_network_epochs + initial_network_epochs * (loop_n + 1), 10000)
-    initial_llh = train_network()
-    log_likelihood(total_steps_taken, metrics, results_dir, initial_llh.item())
+    if done:
+        current_steps = 0
+        current_state = env.reset()
+    
+    if (total_steps_taken + 1) % 1000 == 0:
+        mbrl_solver.save(mbrl_path)
+        policy = mbrl_solver.make_policy()
+        policy.save(os.path.join(agents_dir, f"agent_step{total_steps_taken}"))
+        log_rewards(total_steps_taken, eval_env, policy, metrics, results_dir, args.n_eval_episodes)
+        log_likelihood(total_steps_taken, metrics, results_dir, initial_llh.item())
