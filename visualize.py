@@ -25,7 +25,7 @@ action_range = env.action_space.high
 print(action_dim, action_range, obs_dim)
 
 # Setup policy
-policy_file = "./experiments/agent_loop23"
+policy_file = "./experiments/agent_loop78"
 policy = Policy(None, action_range, 3, DEVICE)
 policy.load(policy_file, cpu=True)
 
