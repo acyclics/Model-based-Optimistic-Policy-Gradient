@@ -11,46 +11,42 @@ from copy import deepcopy
 from time import time
 
 import mbopg.utils as utils
-from mbopg.actor import SacDiagGaussianActor
+from mbopg.actor import DeterministicActor
 from mbopg.critic import DoubleQCritic
 from mbopg.replay import ReplayBuffer
 
 
 class Policy():
 
-    def __init__(self, actor, action_range, noise_dim, device):
+    def __init__(self, actor, action_range, noise_dim, act_std, device):
         self.actor = actor
         self.action_range = action_range
         self.noise_dim = noise_dim
+        self.act_std = act_std
         self.device = device
     
     def act(self, obs, sample=False):
         obs = torch.FloatTensor(obs).to(self.device)
         obs = obs.unsqueeze(0)
-        act_dist, noise_dist = self.actor(obs)
+        action, noise_mu = self.actor(obs)
+        action = action.detach()
 
         if sample:
-            action = act_dist.sample()
-            log_prob = act_dist.log_prob(action)[0]
-            log_prob = log_prob.detach().cpu().numpy()
-        else:
-            action = act_dist.mean
-            log_prob = None
+            action += torch.randn_like(action) * self.act_std
         
         action = action[0]
         action = action * self.action_range[0:-self.noise_dim]
         
-        return action.detach().cpu().numpy(), log_prob
+        return action.detach().cpu().numpy()
     
     def eval_act(self, obs, sample=False):
         obs = torch.FloatTensor(obs).to(self.device)
         obs = obs.unsqueeze(0)
-        act_dist, noise_dist = self.actor(obs)
+        action, noise_mu = self.actor(obs)
+        action = action.detach()
 
         if sample:
-            action = act_dist.sample()
-        else:
-            action = act_dist.mean
+            action += torch.randn_like(action) * self.act_std
         
         action = action[0]
         action = action * self.action_range[0:-self.noise_dim]
@@ -61,7 +57,8 @@ class Policy():
         save_dict = {
             'actor': self.actor,
             'action_range': self.action_range,
-            'noise_dim': self.noise_dim
+            'noise_dim': self.noise_dim,
+            'act_std': self.act_std
         }
         torch.save(save_dict, filepath)
     
@@ -73,6 +70,7 @@ class Policy():
         self.actor = save_dict['actor']
         self.action_range = save_dict['action_range']
         self.noise_dim = save_dict['noise_dim']
+        self.act_std = save_dict['act_std']
 
 
 class MBRL_solver(nn.Module):
@@ -141,9 +139,9 @@ class MBRL_solver(nn.Module):
         return policy, critic
     
     def make_policy(self, policy):
-        actor = SacDiagGaussianActor(self.obs_dim, self.action_dim, self.noise_dim, self.actor_hidden_dim, self.actor_hidden_layers, self.actor_logstd_bounds).to(self.device)
+        actor = DeterministicActor(self.obs_dim, self.action_dim, self.noise_dim, self.actor_hidden_dim, self.actor_hidden_layers).to(self.device)
         actor.load_state_dict(policy)
-        policy = Policy(actor, self.action_range, self.noise_dim, self.device)
+        policy = Policy(actor, self.action_range, self.noise_dim, 0.1, self.device)
         return policy
     
     def _get_initial_data(self, dataset_states, dataset_actions, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob):
@@ -163,14 +161,12 @@ class MBRL_solver(nn.Module):
                 act = dataset_actions[ridx]
                 rew = dataset_rewards[ridx]
                 d = dataset_dones[ridx]
-                lp = dataset_logprob[ridx]
 
                 initial_obs1.append(init_obs1)
                 initial_obs2.append(init_obs2)
                 initial_act.append(act)
                 initial_rewards.append(rew)
                 initial_dones.append(d)
-                initial_logprob.append(lp)
 
             obs = torch.stack(initial_obs2, dim=0)
             initial_obs = torch.stack(initial_obs1, dim=0)
@@ -178,7 +174,6 @@ class MBRL_solver(nn.Module):
             initial_act = torch.stack(initial_act, dim=0)
             initial_rewards = torch.stack(initial_rewards, dim=0)
             initial_dones = torch.stack(initial_dones, dim=0)
-            initial_logprob = torch.stack(initial_logprob, dim=0)
 
             return obs, initial_obs, initial_obs2, initial_act, initial_rewards, initial_dones, initial_logprob
 
@@ -193,16 +188,10 @@ class MBRL_solver(nn.Module):
         Ws = []
 
         for t in range(self.horizon):
-            act_dist, noise_dist = self.actor(obs)
-
-            act_action = act_dist.rsample()
-            noise_action = noise_dist.rsample()
+            act_action, noise_action = self.actor(obs)
 
             action = act_action * self.action_range[0:-self.noise_dim].unsqueeze(dim=0)
             z = noise_action * self.action_range[-self.noise_dim:].unsqueeze(dim=0)
-
-            act_log_prob = act_dist.log_prob(act_action).sum(-1)
-            noise_log_prob = noise_dist.log_prob(noise_action).sum(-1)
 
             w = network.sample(1, z)
 
@@ -214,42 +203,42 @@ class MBRL_solver(nn.Module):
             
             states.append(obs)
             actions.append(act_action)
-            act_log_probs.append(act_log_prob)
-            noise_log_probs.append(noise_log_prob)
             dones.append(done)
             rewards.append(reward)
-            total_log_probs.append(act_log_prob)
             Ws.append(w)
 
             if t + 1 == self.horizon:
-                act_dist, noise_dist = self.actor(next_obs)
-                next_action = act_dist.rsample()
-                next_act_log_prob = act_dist.log_prob(next_action).sum(-1)
-                next_noise = noise_dist.rsample()
-                next_noise_log_prob = noise_dist.log_prob(next_noise).sum(-1)
                 break
             
             obs = next_obs
 
-        return states, actions, act_log_probs, noise_log_probs, total_log_probs, rewards, dones, next_obs, next_action, next_act_log_prob, next_noise, next_noise_log_prob
+        return states, actions, rewards, dones, next_obs
 
     def _train_critic(self, data, rollout):
         obs, initial_obs, initial_obs2, initial_act, initial_rewards, initial_dones, initial_logprob = data
-        states, actions, act_log_probs, noise_log_probs, total_log_probs, rewards, dones, next_obs, next_action, next_act_log_prob, next_noise, next_noise_log_prob = rollout
+        states, actions, rewards, dones, next_obs = rollout
+
+        target_noise = 0.1
+        noise_clip = 0.2
+        act_limit = 1.0
+
+        with torch.no_grad():
+            pi_targ, _ = self.actor_target(next_obs)
+            epsilon = torch.randn_like(pi_targ) * target_noise
+            epsilon = torch.clamp(epsilon, -noise_clip, noise_clip)
+            next_action = pi_targ + epsilon
+            next_action = torch.clamp(next_action, -act_limit, act_limit)
 
         critic_loss1, critic_loss2 = [], []
         target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
-        target_V = torch.min(target_Q1, target_Q2)
-        return_expansion = target_V.detach() - self.alpha.detach() * next_act_log_prob.unsqueeze(dim=-1)
+        return_expansion = torch.min(target_Q1, target_Q2)
         
         for t in reversed(range(len(rewards))):
-            return_expansion = rewards[t].unsqueeze(dim=-1) - self.alpha.detach() * act_log_probs[t].unsqueeze(dim=-1) + (1.0 - dones[t].unsqueeze(dim=-1)) * self.gamma * return_expansion
+            return_expansion = rewards[t].unsqueeze(dim=-1) + (1.0 - dones[t].unsqueeze(dim=-1)) * self.gamma * return_expansion
     
-        act_dist, noise_dist = self.actor(initial_obs)
-        next_initial_action = act_dist.rsample()
-        next_initial_log_prob = act_dist.log_prob(next_initial_action).sum(-1, keepdim=True)
-        target_Q = initial_rewards - self.alpha.detach() * next_initial_log_prob + (1 - initial_dones) * self.gamma * return_expansion
+        target_Q = initial_rewards + (1 - initial_dones) * self.gamma * return_expansion
         target_Q = target_Q.detach()
+
         current_Q1, current_Q2 = self.critic(initial_obs, initial_act)
         err1 = (current_Q1 - target_Q).pow(2)
         err2 = (current_Q2 - target_Q).pow(2)
@@ -271,14 +260,15 @@ class MBRL_solver(nn.Module):
 
     def _train_actor(self, network, data, rollout):
         obs, initial_obs, initial_obs2, initial_act, initial_rewards, initial_dones, initial_logprob = data
-        states, actions, act_log_probs, noise_log_probs, total_log_probs, rewards, dones, next_obs, next_action, next_act_log_prob, next_noise, next_noise_log_prob = rollout
+        states, actions, rewards, dones, next_obs = rollout
 
+        next_action, _ = self.actor(next_obs)
         noise_actor_Q1, noise_actor_Q2 = self.critic(next_obs, next_action)
         noise_actor_V = torch.min(noise_actor_Q1, noise_actor_Q2)
-        noise_return_expansion = noise_actor_V - self.noise_alpha * next_noise_log_prob.unsqueeze(dim=-1)
+        noise_return_expansion = noise_actor_V
         
         for t in reversed(range(len(rewards))):
-            noise_return_expansion = rewards[t].unsqueeze(dim=-1) - self.noise_alpha * noise_log_probs[t].unsqueeze(dim=-1) + (1.0 - dones[t].unsqueeze(dim=-1)) * self.gamma * noise_return_expansion
+            noise_return_expansion = rewards[t].unsqueeze(dim=-1) + (1.0 - dones[t].unsqueeze(dim=-1)) * self.gamma * noise_return_expansion
 
         noise_return_expansion = initial_rewards + self.gamma * (1 - initial_dones) * noise_return_expansion
         noise_actor_loss = -noise_return_expansion.mean()
@@ -286,12 +276,9 @@ class MBRL_solver(nn.Module):
         all_states = torch.cat(states, dim=0)
         all_states = torch.cat([initial_obs, all_states, next_obs], dim=0)
         all_states = all_states.detach()
-        act_dist, noise_dist = self.actor(all_states)
-        action = act_dist.rsample()
-        log_prob = act_dist.log_prob(action).sum(-1, keepdim=True)
-        actor_Q1, actor_Q2 = self.critic(all_states, action)
-        actor_Q = torch.min(actor_Q1, actor_Q2)
-        actor_loss = (self.alpha.detach() * log_prob - actor_Q).mean()
+        action, _ = self.actor(all_states)
+        actor_Q, _ = self.critic(all_states, action)
+        actor_loss = (-actor_Q).mean()
 
         total_actor_loss = noise_actor_loss + actor_loss
 
@@ -306,14 +293,6 @@ class MBRL_solver(nn.Module):
         self.actor_optimizer_noise.step()
         self.actor_optimizer_act.step()
 
-        total_log_probs = torch.cat(total_log_probs, dim=0).unsqueeze(dim=-1)
-        total_log_probs = torch.cat([total_log_probs, log_prob], dim=0)
-        self.log_alpha_optimizer.zero_grad()
-        alpha_loss = (self.alpha * (-total_log_probs - self.target_entropy).detach()).mean()
-        alpha_loss.backward()
-        torch.nn.utils.clip_grad_norm_([self.log_alpha], 5.0)
-        self.log_alpha_optimizer.step()
-
         return actor_loss
 
     def _solve(self, network, dataset_states, dataset_actions, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob, verbose=True):
@@ -325,6 +304,7 @@ class MBRL_solver(nn.Module):
             
             if (epoch + 1) % self.target_update_frequency == 0:
                 utils.soft_update_params(self.critic, self.critic_target, self.tau)
+                utils.soft_update_params(self.actor, self.actor_target, self.tau)
 
                 actor_loss = self._train_actor(network, data, rollout)
 
@@ -333,8 +313,11 @@ class MBRL_solver(nn.Module):
                     sys.stdout.flush()
 
     def full_reset(self):
-        self.actor = SacDiagGaussianActor(self.obs_dim, self.action_dim, self.noise_dim, self.actor_hidden_dim, self.actor_hidden_layers, self.actor_logstd_bounds).to(self.device)
-        
+        self.actor = DeterministicActor(self.obs_dim, self.action_dim, self.noise_dim, self.actor_hidden_dim, self.actor_hidden_layers).to(self.device)
+        self.actor_target = DeterministicActor(self.obs_dim, self.action_dim, self.noise_dim, self.actor_hidden_dim, self.actor_hidden_layers).to(self.device)
+        self.actor_target.load_state_dict(self.actor.state_dict())
+        self.actor_target.requires_grad = False
+
         self.actor_optimizer_act = torch.optim.Adam(self.actor.trunk_act.parameters(), lr=self.actor_lr, betas=self.actor_betas)
         self.actor_optimizer_noise = torch.optim.Adam(self.actor.trunk_noise.parameters(), lr=self.actor_lr, betas=self.actor_betas)
 
@@ -349,7 +332,7 @@ class MBRL_solver(nn.Module):
                                                     betas=[0.9, 0.999])
 
     def reset_noise(self):
-        new_actor = SacDiagGaussianActor(self.obs_dim, self.action_dim, self.noise_dim, self.actor_hidden_dim, self.actor_hidden_layers, self.actor_logstd_bounds).to(self.device)
+        new_actor = DeterministicActor(self.obs_dim, self.action_dim, self.noise_dim, self.actor_hidden_dim, self.actor_hidden_layers).to(self.device)
         self.actor.trunk_noise.load_state_dict(new_actor.trunk_noise.state_dict())
         self.actor_optimizer_noise = torch.optim.Adam(self.actor.trunk_noise.parameters(), lr=self.actor_lr, betas=self.actor_betas)
 

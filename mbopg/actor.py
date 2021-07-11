@@ -8,151 +8,21 @@ from torch import distributions as pyd
 import mbopg.utils as utils
 
 
-class TanhTransform(pyd.transforms.Transform):
-    domain = pyd.constraints.real
-    codomain = pyd.constraints.interval(-1.0, 1.0)
-    bijective = True
-    sign = +1
-
-    def __init__(self, cache_size=1):
-        super().__init__(cache_size=cache_size)
-
-    @staticmethod
-    def atanh(x):
-        return 0.5 * (x.log1p() - (-x).log1p())
-
-    def __eq__(self, other):
-        return isinstance(other, TanhTransform)
-
-    def _call(self, x):
-        return x.tanh()
-
-    def _inverse(self, y):
-        # We do not clamp to the boundary here as it may degrade the performance of certain algorithms.
-        # one should use `cache_size=1` instead
-        return self.atanh(y)
-
-    def log_abs_det_jacobian(self, x, y):
-        # We use a formula that is more numerically stable, see details in the following link
-        # https://github.com/tensorflow/probability/commit/ef6bb176e0ebd1cf6e25c6b5cecdd2428c22963f#diff-e120f70e92e6741bca649f04fcd907b7
-        return 2. * (math.log(2.) - x - F.softplus(-2. * x))
-
-
-class SquashedNormal(pyd.transformed_distribution.TransformedDistribution):
-    def __init__(self, loc, scale):
-        self.loc = loc
-        self.scale = scale
-
-        self.base_dist = pyd.Normal(loc, scale)
-        transforms = [TanhTransform()]
-        super().__init__(self.base_dist, transforms)
-
-    @property
-    def mean(self):
-        mu = self.loc
-        for tr in self.transforms:
-            mu = tr(mu)
-        return mu
-
-
-class SacDiagGaussianActor(nn.Module):
+class DeterministicActor(nn.Module):
     """torch.distributions implementation of an diagonal Gaussian policy."""
-    def __init__(self, obs_dim, action_dim, noise_dim, hidden_dim, hidden_depth,
-                 log_std_bounds):
+    def __init__(self, obs_dim, action_dim, noise_dim, hidden_dim, hidden_depth):
         super().__init__()
 
-        self.log_std_bounds = log_std_bounds
-        self.trunk_act = utils.mlp(obs_dim, hidden_dim, 2 * (action_dim - noise_dim),
-                               hidden_depth)
-        self.trunk_noise = utils.mlp(obs_dim, hidden_dim, 2 * noise_dim,
-                               hidden_depth)
+        self.trunk_act = utils.mlp(obs_dim, hidden_dim, action_dim - noise_dim, hidden_depth)
+        self.trunk_noise = utils.mlp(obs_dim, hidden_dim, noise_dim, hidden_depth)
 
-        self.outputs = dict()
         self.apply(utils.weight_init)
 
     def forward(self, obs):
-        act_mu, act_log_std = self.trunk_act(obs).chunk(2, dim=-1)
-        noise_mu, noise_log_std = self.trunk_noise(obs).chunk(2, dim=-1)
+        act_mu = self.trunk_act(obs)
+        noise_mu = self.trunk_noise(obs)
 
-        # constrain log_std inside [log_std_min, log_std_max]
-        act_log_std = torch.tanh(act_log_std)
-        act_log_std_min, act_log_std_max = self.log_std_bounds
-        act_log_std = act_log_std_min + 0.5 * (act_log_std_max - act_log_std_min) * (act_log_std + 1)
+        act_mu = torch.tanh(act_mu)
+        noise_mu = torch.tanh(noise_mu)
 
-        noise_log_std = torch.tanh(noise_log_std)
-        noise_log_std_min, noise_log_std_max = self.log_std_bounds
-        noise_log_std = noise_log_std_min + 0.5 * (noise_log_std_max - noise_log_std_min) * (noise_log_std + 1)
-
-        act_std = act_log_std.exp()
-        noise_std = noise_log_std.exp()
-
-        act_dist = SquashedNormal(act_mu, act_std)
-        noise_dist = SquashedNormal(noise_mu, noise_std)
-
-        return act_dist, noise_dist
-
-
-class DiagGaussianActor(nn.Module):
-    """torch.distributions implementation of an diagonal Gaussian policy."""
-    def __init__(self, obs_dim, action_dim, hidden_dim, hidden_depth):
-        super().__init__()
-
-        #self.std = std
-        self.trunk = utils.mlp(obs_dim, hidden_dim, action_dim,
-                               hidden_depth)
-
-        self.outputs = dict()
-        self.apply(utils.weight_init)
-
-    def forward(self, obs):
-        mu = self.trunk(obs)
-        mu = torch.tanh(mu)
-
-        # constrain log_std inside [log_std_min, log_std_max]
-        #log_std = torch.tanh(log_std)
-        #log_std_min, log_std_max = self.log_std_bounds
-        #log_std = log_std_min + 0.5 * (log_std_max - log_std_min) * (log_std + 1)
-
-        #std = log_std.exp()
-        #std = self.std.unsqueeze(dim=0).repeat(obs.shape[0], 1)
-
-        self.outputs['mu'] = mu
-        #self.outputs['std'] = std
-
-        #dist = SquashedNormal(mu, std)
-        return mu
-
-
-"""
-class StochasticDiagGaussianActor(nn.Module):
-    torch.distributions implementation of an diagonal Gaussian policy.
-    def __init__(self, obs_dim, action_dim, hidden_dim, hidden_depth):
-        super().__init__()
-
-        #self.std = std
-        self.trunk = utils.mlp(obs_dim, hidden_dim, action_dim,
-                               hidden_depth)
-
-        self.outputs = dict()
-        self.apply(utils.weight_init)
-
-    def forward(self, obs):
-        mu = self.trunk(obs)
-        mu = torch.tanh(mu)
-
-        # constrain log_std inside [log_std_min, log_std_max]
-        #log_std = torch.tanh(log_std)
-        #log_std_min, log_std_max = self.log_std_bounds
-        #log_std = log_std_min + 0.5 * (log_std_max - log_std_min) * (log_std + 1)
-
-        #std = log_std.exp()
-        #std = self.std.unsqueeze(dim=0).repeat(obs.shape[0], 1)
-
-        self.outputs['mu'] = mu
-        #self.outputs['std'] = std
-
-        #dist = SquashedNormal(mu, std)
-        return mu
-
-        pyd.Normal(loc, scale)
-"""   
+        return act_mu, noise_mu

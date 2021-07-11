@@ -161,7 +161,6 @@ def add_to_dataset(current_state, u, reward, done, next_state, log_prob, current
     r = torch.from_numpy(np.array([reward]).astype(np.float32)).to(DEVICE)
     d = torch.from_numpy(np.array([done]).astype(np.float32)).to(DEVICE)
     ns = torch.from_numpy(next_state.astype(np.float32)).to(DEVICE)
-    lp = torch.from_numpy(log_prob.astype(np.float32)).to(DEVICE)
 
     state_min = np.minimum(state_min, current_state.astype(np.float32))
     state_max = np.maximum(state_max, current_state.astype(np.float32))
@@ -171,7 +170,6 @@ def add_to_dataset(current_state, u, reward, done, next_state, log_prob, current
     dataset_rewards.append(r)
     dataset_dones.append(d)
     dataset_next_states.append(ns)
-    dataset_logprob.append(lp)
 
     if len(dataset_state) > args.dataset_len:
         dataset_state = dataset_state[1:]
@@ -180,7 +178,6 @@ def add_to_dataset(current_state, u, reward, done, next_state, log_prob, current
         dataset_dones = dataset_dones[1:]
         dataset_next_states = dataset_next_states[1:]
         dataset_next_states = dataset_next_states[1:]
-        dataset_logprob = dataset_logprob[1:]
 
 
 def train_network():
@@ -283,7 +280,8 @@ current_state = env.reset()
 policy = mbrl_solver.make_policy(mbrl_solver.actor.state_dict())
 
 while episode_steps < args.n_explore_steps:
-    greedy_u, log_prob = policy.act(current_state, sample=True)
+    greedy_u = policy.act(current_state, sample=True)
+    log_prob = None
 
     next_state, rew, done, _ = env.step(greedy_u)
 
@@ -316,7 +314,8 @@ for loop_n in range(N_OVERALL_LOOPS):
     current_state = env.reset()
 
     while episode_steps < args.n_explore_steps:
-        greedy_u, log_prob = policy.act(current_state, sample=True)
+        greedy_u = policy.act(current_state, sample=True)
+        log_prob = None
 
         next_state, rew, done, _ = env.step(greedy_u)
 
