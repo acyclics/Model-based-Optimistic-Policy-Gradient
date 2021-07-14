@@ -7,12 +7,10 @@ from pathlib import Path
 import argparse
 from copy import deepcopy
 
-import gym
-import pybulletgym
-
 from mbopg.bh_mdp import Multi_SI_BayesNetwork
 from mbopg.mbrl import MBRL_solver
 from logs import log_rewards, log_likelihood
+from toyenv import ToyEnv
 
 
 # Overall hyperparameters
@@ -83,16 +81,15 @@ Path(results_dir).mkdir(parents=True, exist_ok=True)
 Path(agents_dir).mkdir(parents=True, exist_ok=True)
 
 # Set seeds
-np.random.seed(args.seed)
-torch.manual_seed(args.seed)
-random.seed(args.seed)
+#np.random.seed(args.seed)
+#torch.manual_seed(args.seed)
+#random.seed(args.seed)
 
 # Setup environment variables
-env = gym.make(args.env)
-eval_env = gym.make(args.env)
-obs_dim = env.observation_space.shape[0]
-action_dim = env.action_space.shape[0]
-action_range = env.action_space.high
+env = ToyEnv()
+obs_dim = env.obs_dim
+action_dim = env.act_dim
+action_range = env.action_range
 
 # Setup network
 state_min = np.ones((obs_dim), dtype=np.float32) * 1000000.0
@@ -102,8 +99,8 @@ total_training_steps = 0
 
 network = Multi_SI_BayesNetwork(obs_dim, action_dim, args.obs_scale, state_min, state_max,
                             args.network_h_units, args.network_h_layers,
-                            grad_norm=args.network_grad_norm, LLH_var=1.0,
-                            state_LLH_var=0.1, initial_logvar=-40.0,
+                            grad_norm=args.network_grad_norm, LLH_var=0.1,
+                            state_LLH_var=1.0, initial_logvar=np.log(0.1),
                             noise_dim=noise_dim, entropy=args.entropy, device=DEVICE)
 if args.resume:
     network.load(net_path)
@@ -119,9 +116,6 @@ mbrl_solver = MBRL_solver(obs_dim=obs_dim, action_dim=action_dim, horizon=args.p
               actor_lr=args.actor_lr, critic_lr=args.critic_lr, capacity=args.replay_capacity, gamma=args.gamma, alpha=args.alpha,
               noise_alpha=args.noise_alpha)
 
-if args.resume:
-    mbrl_solver.load(mbrl_path)
-
 # Train on initial dataset
 dataset_state = []
 dataset_action = []
@@ -131,7 +125,7 @@ dataset_next_states = []
 dataset_logprob = []
 
 
-def add_to_dataset(current_state, u, reward, done, next_state, log_prob, current_step):
+def add_to_dataset():
     global args
     global dataset_state
     global dataset_action
@@ -145,45 +139,46 @@ def add_to_dataset(current_state, u, reward, done, next_state, log_prob, current
     global mbrl_solver
     global env
 
-    done_no_max = done
+    ds, da, dr, dns, dd = env.initial_dataset()
 
-    if not args.terminal_done:
-        """
-            Some environments are "done" when episode length is reached.
-            This is a quick hack for environments that only "done"
-            when episode length is reached.
-        """
-        if env._max_episode_steps == current_step - 1:
-            done = False
+    for idx in range(len(ds)):
+        current_state = ds[idx]
+        u = da[idx]
+        reward = dr[idx]
+        done = dd[idx]
+        next_state = dns[idx]
+        x = torch.from_numpy(current_state.astype(np.float32)).to(DEVICE)
+        a = torch.from_numpy(u.astype(np.float32)).to(DEVICE)
+        r = torch.from_numpy(np.array([reward]).astype(np.float32)).to(DEVICE)
+        d = torch.from_numpy(np.array([done]).astype(np.float32)).to(DEVICE)
+        ns = torch.from_numpy(next_state.astype(np.float32)).to(DEVICE)
 
-    x = torch.from_numpy(current_state.astype(np.float32)).to(DEVICE)
-    a = torch.from_numpy(u.astype(np.float32)).to(DEVICE)
-    r = torch.from_numpy(np.array([reward]).astype(np.float32)).to(DEVICE)
-    d = torch.from_numpy(np.array([done]).astype(np.float32)).to(DEVICE)
-    ns = torch.from_numpy(next_state.astype(np.float32)).to(DEVICE)
-    lp = torch.from_numpy(log_prob.astype(np.float32)).to(DEVICE)
+        state_min = np.minimum(state_min, current_state.astype(np.float32))
+        state_max = np.maximum(state_max, current_state.astype(np.float32))
 
-    state_min = np.minimum(state_min, current_state.astype(np.float32))
-    state_max = np.maximum(state_max, current_state.astype(np.float32))
-
-    dataset_state.append(x)
-    dataset_action.append(a)
-    dataset_rewards.append(r)
-    dataset_dones.append(d)
-    dataset_next_states.append(ns)
-    dataset_logprob.append(lp)
-
-    if len(dataset_state) > args.dataset_len:
-        dataset_state = dataset_state[1:]
-        dataset_action = dataset_action[1:]
-        dataset_rewards = dataset_rewards[1:]
-        dataset_dones = dataset_dones[1:]
-        dataset_next_states = dataset_next_states[1:]
-        dataset_next_states = dataset_next_states[1:]
-        dataset_logprob = dataset_logprob[1:]
+        dataset_state.append(x)
+        dataset_action.append(a)
+        dataset_rewards.append(r)
+        dataset_dones.append(d)
+        dataset_next_states.append(ns)
+    
+    return ds, da, dr, dns, dd
 
 
-def train_network(n_train_steps):
+ds, da, dr, dns, dd = add_to_dataset()
+
+max_r = -np.inf
+min_r = np.inf
+
+for r in dr:
+    max_r = max(max_r, r)
+    min_r = min(min_r, r)
+
+print(f"Max reward = {max_r} ; Min reward = {min_r}")
+sys.stdout.flush()
+
+
+def train_network(n_itrs):
     global network
     global args
     global net_path
@@ -196,58 +191,78 @@ def train_network(n_train_steps):
     global state_min
     global state_max
     global current_beta
-    global total_training_steps
 
     network.set_obs_trans(state_min, state_max)
 
+    total_training_steps = 0
     minibatch_size = min(args.network_batchsize, len(dataset_state))
+    epoch = 0
     avg_llh = 0
-    avg_H = 0
-    avg_err = 0
+    initial_llh = None
 
-    for _ in range(n_train_steps):
-        mb_s = []
-        mb_a = []
-        mb_r = []
-        mb_d = []
-        mb_ns = []
+    dataset = list(zip(dataset_state, dataset_action, dataset_rewards, dataset_dones, dataset_next_states))
 
-        for _ in range(minibatch_size):
-            idx = np.random.randint(0, len(dataset_state))
-            mb_s.append(dataset_state[idx])
-            mb_a.append(dataset_action[idx])
-            mb_r.append(dataset_rewards[idx])
-            mb_d.append(dataset_dones[idx])
-            mb_ns.append(dataset_next_states[idx])
+    for _ in range(n_itrs):
+        avg_llh = 0
+        avg_loss = 0
+        avg_H = 0
+        avg_err = 0
 
-        mb_s = torch.stack(mb_s, dim=0)
-        mb_a = torch.stack(mb_a, dim=0)
-        mb_r = torch.stack(mb_r, dim=0)
-        mb_d = torch.stack(mb_d, dim=0)
-        mb_ns = torch.stack(mb_ns, dim=0)
+        random.shuffle(dataset)
+        dataset_state, dataset_action, dataset_rewards, dataset_dones, dataset_next_states = zip(*dataset)
 
-        network.K = args.K_value
-        network.J = args.J_value
+        for idx in range(0, len(dataset_state), minibatch_size):
+            mb_s = dataset_state[idx : idx + minibatch_size]
+            mb_a = dataset_action[idx : idx + minibatch_size]
+            mb_r = dataset_rewards[idx : idx + minibatch_size]
+            mb_d = dataset_dones[idx : idx + minibatch_size]
+            mb_ns = dataset_next_states[idx : idx + minibatch_size]
 
-        if total_training_steps > args.beta_threshold:
-            current_beta += args.beta_stepsize
+            mb_s = torch.stack(mb_s, dim=0)
+            mb_a = torch.stack(mb_a, dim=0)
+            mb_r = torch.stack(mb_r, dim=0)
+            mb_d = torch.stack(mb_d, dim=0)
+            mb_ns = torch.stack(mb_ns, dim=0)
+
+            network.K = args.K_value
+            network.J = args.J_value
+
+            if total_training_steps > args.beta_threshold:
+                current_beta += args.beta_stepsize
+            
+            network.beta = min(1.0, current_beta)
+            
+            loss, log_lik, log_H, err = network.train(mb_s, mb_a, mb_r, mb_d, mb_ns)
+
+            avg_llh += log_lik
+            avg_loss += loss
+            avg_H += log_H
+            avg_err += err
+            
+            total_training_steps += 1
         
-        network.beta = min(1.0, current_beta)
-        
-        loss, log_lik, log_H, err = network.train(mb_s, mb_a, mb_r, mb_d, mb_ns)        
-        total_training_steps += 1
-        avg_llh += log_lik
-        avg_H += log_H
-        avg_err += err
+        epoch += 1
 
-    avg_llh = avg_llh / n_train_steps
-    avg_H = avg_H / n_train_steps
-    avg_err = avg_err / n_train_steps
+        avg_llh /= (len(dataset_state) / minibatch_size)
+        avg_loss /= (len(dataset_state) / minibatch_size)
+        avg_H /= (len(dataset_state) / minibatch_size)
+        avg_err /= (len(dataset_state) / minibatch_size)
 
-    print(f"Likelihood = {avg_llh} ; H = {avg_H} ; Err = {avg_err} ; Beta = {network.beta}")
-    sys.stdout.flush()
+        if initial_llh == None:
+            initial_llh = avg_llh
 
-    return avg_llh
+        print(f"Epoch = {epoch} ; Average loss = {avg_loss} ; Likelihood = {avg_llh} ; H = {avg_H} ; Err = {avg_err} ; Beta = {network.beta}")
+        sys.stdout.flush()
+
+    dataset_state = list(dataset_state)
+    dataset_action = list(dataset_action)
+    dataset_rewards = list(dataset_rewards)
+    dataset_dones = list(dataset_dones)
+    dataset_next_states = list(dataset_next_states)
+
+    #network.save(net_path)
+
+    return initial_llh
 
 
 total_steps_taken = 0
@@ -257,54 +272,80 @@ print("Warming up")
 print()
 sys.stdout.flush()
 
-episode_steps = 0
-current_steps = 0
-current_state = env.reset()
-policy = mbrl_solver.make_policy()
+if True:
+    print("Training network")
+    sys.stdout.flush()
+    train_network(3000)
+else:
+    print(state_min, state_max)
+    network.load(net_path)
+    network.set_obs_trans(state_min, state_max)
 
-while episode_steps < args.n_explore_steps:
-    greedy_u, log_prob = policy.act(current_state, sample=True)
+all_prev_rews = []
+all_new_rews = []
 
-    next_state, rew, done, _ = env.step(greedy_u)
+for idx in range(0, 1):
+    rrr = 0.0
 
-    current_steps += 1
-    episode_steps += 1
-    total_steps_taken += 1
+    for _ in range(10):
+        obs = ds[idx]
+        print(obs)
+        sys.stdout.flush()
+        prev_action = da[idx]
+        #prev_action = np.random.uniform(-1.0, 1.0, (3)) * 0.01
+        prev_reward = dr[idx]
+        obs = torch.from_numpy(obs).unsqueeze(dim=0).to(DEVICE).float()
+        prev_action = torch.from_numpy(prev_action).unsqueeze(dim=0).to(DEVICE).float()
 
-    add_to_dataset(current_state, greedy_u, rew, done, next_state, log_prob, current_steps)
+        z = (-2.0 - 2.0) * torch.rand((1, noise_dim)) + 2.0
+        z = z.float().to(DEVICE)
+        z.requires_grad=True
 
-    current_state = next_state.copy()
+        for i in range(1000):
+            w = network.sample(1, z)
+            next_obs, reward, done = network.primarynet(obs, prev_action, w)
+            if i == 0:
+                initial_rew = reward
+            z_grad = torch.autograd.grad(torch.mean(reward), z)
+            #z = torch.add(z, )
+            z = z + z_grad[0] * 0.1
+            z = torch.clamp(z, -2.0, 2.0)
 
-    if done:
-        current_steps = 0
-        current_state = env.reset()
+        rrr += abs(reward - initial_rew)
+        
+    rrr = rrr / 10
+    all_prev_rews.append(rrr)
 
-if not args.resume:
-    train_network(100)
+print(all_prev_rews)
+new_r = 0.0
 
-current_steps = 0
-current_state = env.reset()
+for _ in range(10):
+    idx = -1
 
-while total_steps_taken < args.T_max:
-    greedy_u, log_prob = policy.act(current_state, sample=True)
+    obs = ds[idx]
+    obs = np.random.uniform(0.5, 0.6, (8)).astype(np.float32)
+    print(obs)
+    sys.stdout.flush()
+    prev_action = da[idx]
+    #prev_action = np.random.uniform(-1.0, 1.0, (3)) * 0.01
+    prev_reward = dr[idx]
+    obs = torch.from_numpy(obs).unsqueeze(dim=0).to(DEVICE).float()
+    prev_action = torch.from_numpy(prev_action).unsqueeze(dim=0).to(DEVICE).float()
 
-    next_state, rew, done, _ = env.step(greedy_u)
+    z = (-2.0 - 2.0) * torch.rand((1, noise_dim)) + 2.0
+    z = z.float().to(DEVICE)
+    z.requires_grad=True
 
-    current_steps += 1
-    total_steps_taken += 1
-
-    add_to_dataset(current_state, greedy_u, rew, done, next_state, log_prob, current_steps)
-    current_state = next_state.copy()
-    initial_llh = train_network(1)
-    mbrl_solver.solve_once(network, dataset_state, dataset_action, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob, verbose=True)
-
-    if done:
-        current_steps = 0
-        current_state = env.reset()
+    for i in range(1000):
+        w = network.sample(1, z)
+        next_obs, reward, done = network.primarynet(obs, prev_action, w)
+        if i == 0:
+            initial_rew = reward
+        z_grad = torch.autograd.grad(torch.mean(reward), z)
+        #z = torch.add(z, )
+        z = z + z_grad[0] * 0.1
+        z = torch.clamp(z, -2.0, 2.0)
     
-    if (total_steps_taken + 1) % 1000 == 0:
-        mbrl_solver.save(mbrl_path)
-        policy = mbrl_solver.make_policy()
-        policy.save(os.path.join(agents_dir, f"agent_step{total_steps_taken}"))
-        log_rewards(total_steps_taken, eval_env, policy, metrics, results_dir, args.n_eval_episodes)
-        log_likelihood(total_steps_taken, metrics, results_dir, initial_llh.item())
+    new_r += abs(reward - initial_rew)
+
+print(new_r / 10)

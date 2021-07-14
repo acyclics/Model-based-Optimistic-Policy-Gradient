@@ -29,6 +29,11 @@ class HypernetWeight(nn.Module):
         self.act = activation
 
         bias = True
+        noise_var = (2 + 2)**2 / 12.0
+        #noise_var = 1.0
+        n_noise = self.noise_shape
+        relu = True
+        out_bias = True
 
         self.f1 = nn.Linear(1, h_units, bias=bias)
         self.f2 = nn.Linear(h_units, h_units, bias=bias)
@@ -42,6 +47,7 @@ class HypernetWeight(nn.Module):
         self.f7 = nn.Linear(h_units, h_units, bias=bias)
         self.f8 = nn.Linear(h_units, h_units, bias=bias)
         self.f9 = nn.Linear(h_units, h_units, bias=bias)
+
         self.out = nn.Linear(h_units, shape, bias=bias)
         
         torch.nn.init.xavier_uniform_(self.f1.weight)
@@ -62,8 +68,13 @@ class HypernetWeight(nn.Module):
         torch.nn.init.zeros_(self.f8.bias)
         torch.nn.init.xavier_uniform_(self.f9.weight)
         torch.nn.init.zeros_(self.f9.bias)
-        torch.nn.init.xavier_uniform_(self.out.weight)
-        torch.nn.init.zeros_(self.out.bias)
+       
+        if is_hyper_w:
+            hyperfan_in_W_init(self.out.weight, noise_var, n_noise, out_bias, relu)
+            torch.nn.init.zeros_(self.out.bias)
+        else:
+            hyperfan_in_b_init(self.out.weight, noise_var, relu)
+            torch.nn.init.zeros_(self.out.bias)
         
     def forward(self, x):
         x1 = x[:, 0:1]
@@ -100,6 +111,28 @@ class HypernetWeight(nn.Module):
         return w.reshape((x.shape[0], self.shape))
 
 
+class SingleHyperNetwork(nn.Module):
+
+    def __init__(self, noise_dim, in_units, out_units, h_units, device):
+        super(SingleHyperNetwork, self).__init__()
+        self.noise_dim = noise_dim
+        self.out_units = out_units
+        self.in_units = in_units
+
+        self.mu_w = HypernetWeight((out_units, in_units), True, h_units=h_units, noise_shape=noise_dim)
+        self.mu_b = HypernetWeight((out_units, ), False, h_units=h_units, noise_shape=noise_dim)
+    
+    def forward(self, z):
+        mu_w = self.mu_w(z)
+        mu_b = self.mu_b(z)
+
+        K = z.shape[0]
+
+        mu_w = mu_w.view(K, -1)
+
+        return mu_w
+
+
 class PrimaryNetwork(nn.Module):
 
     def __init__(self, noise_dim, obs_units, act_units, out_units, hidden_units, hidden_layers, obs_scale, device):
@@ -113,39 +146,36 @@ class PrimaryNetwork(nn.Module):
         self.obs_scale = obs_scale
         self.device = device
         
-        self.obs_w = nn.Parameter(torch.randn(hidden_units, obs_units), requires_grad=True)
+        self.mus = []
+
+        self.obs_mu = nn.Parameter(torch.randn(hidden_units, obs_units), requires_grad=True)
+        self.mus.append(self.obs_mu)
         self.obs_b = nn.Parameter(torch.zeros(hidden_units,), requires_grad=True)
 
-        self.act_w = nn.Parameter(torch.randn(hidden_units, act_units), requires_grad=True)
+        self.act_mu = nn.Parameter(torch.randn(hidden_units, act_units), requires_grad=True)
+        self.mus.append(self.act_mu)
         self.act_b = nn.Parameter(torch.zeros(hidden_units,), requires_grad=True)
 
-        self.tgt_w = nn.Parameter(torch.randn(hidden_units, hidden_units + hidden_units), requires_grad=True)
+        self.tgt_mu = nn.Parameter(torch.randn(hidden_units, hidden_units + hidden_units), requires_grad=True)
+        self.mus.append(self.tgt_mu)
         self.tgt_b = nn.Parameter(torch.zeros(hidden_units,), requires_grad=True)
 
-        self.hidden_w = torch.nn.ParameterList(parameters=[
-            nn.Parameter(torch.randn(hidden_units, hidden_units), requires_grad=True) for _ in range(self.hidden_layers)
-        ])
-        self.hidden_b = torch.nn.ParameterList(parameters=[
-            nn.Parameter(torch.zeros(hidden_units,), requires_grad=True) for _ in range(self.hidden_layers)
-        ])
-        
-        self.state_w = nn.Parameter(torch.randn(obs_units, hidden_units), requires_grad=True)
+        self.hidden_mu = torch.nn.ParameterList(parameters=[nn.Parameter(torch.randn(hidden_units, hidden_units), requires_grad=True) for _ in range(self.hidden_layers)])
+        for i in range(hidden_layers):
+            self.mus.append(self.hidden_mu[i])
+        self.hidden_b = torch.nn.ParameterList(parameters=[nn.Parameter(torch.zeros(hidden_units,), requires_grad=True) for _ in range(self.hidden_layers)])
+
+        self.state_mu = nn.Parameter(torch.randn(obs_units, hidden_units), requires_grad=True)
+        self.mus.append(self.state_mu)
         self.state_b = nn.Parameter(torch.zeros(obs_units,), requires_grad=True)
 
-        self.reward_w = nn.Parameter(torch.randn(1, hidden_units), requires_grad=True)
+        self.reward_mu = nn.Parameter(torch.randn(1, hidden_units), requires_grad=True)
+        self.mus.append(self.reward_mu)
         self.reward_b = nn.Parameter(torch.zeros(1,), requires_grad=True)
 
-        self.done_w = nn.Parameter(torch.randn(1, hidden_units), requires_grad=True)
+        self.done_mu = nn.Parameter(torch.randn(1, hidden_units), requires_grad=True)
+        self.mus.append(self.done_mu)
         self.done_b = nn.Parameter(torch.zeros(1,), requires_grad=True)
-
-        torch.nn.init.xavier_normal_(self.obs_w)
-        torch.nn.init.xavier_normal_(self.act_w)
-        torch.nn.init.xavier_normal_(self.tgt_w)
-        for hid_w in self.hidden_w:
-            torch.nn.init.xavier_normal_(hid_w)
-        torch.nn.init.xavier_normal_(self.state_w)
-        torch.nn.init.xavier_normal_(self.reward_w)
-        torch.nn.init.xavier_normal_(self.done_w)
 
     def set_obs_trans(self, obs_min, obs_max):
         self.obs_min1 = np.expand_dims(obs_min, axis=0)
@@ -162,71 +192,72 @@ class PrimaryNetwork(nn.Module):
         idx = 0
         g_obs = g[:, idx:idx+self.hidden_units]
         g_obs = torch.exp(g_obs)
-        
         idx = idx + self.hidden_units
+
         g_act = g[:, idx:idx+self.hidden_units]
         g_act = torch.exp(g_act)
-        
         idx = idx + self.hidden_units
+
         g_tgt = g[:, idx:idx+self.hidden_units]
         g_tgt = torch.exp(g_tgt)
-        
+        idx = idx + self.hidden_units
+
         g_hidden = []
         for _ in range(self.hidden_layers):
-            idx = idx + self.hidden_units
             g_hid = g[:, idx:idx+self.hidden_units]
             g_hid = torch.exp(g_hid)
             g_hidden.append(g_hid)
-
-        idx = idx + self.hidden_units
+            idx = idx + self.hidden_units
+        
         g_state = g[:, idx:idx+self.obs_units]
         g_state = torch.exp(g_state)
-        
         idx = idx + self.obs_units
+
         g_reward = g[:, idx:idx+1]
         g_reward = torch.exp(g_reward)
-        
         idx = idx + 1
+
         g_done = g[:, idx:idx+1]
         g_done = torch.exp(g_done)
 
         next_states = []
         rewards = []
         dones = []
+
         #obs_unsqueezed = obs.unsqueeze(dim=1)
 
         for i in range(g.shape[0]):
-            obs_w = self.obs_w / torch.norm(self.obs_w, dim=1, keepdim=True)
+            obs_w = self.obs_mu / torch.norm(self.obs_mu, dim=1, keepdim=True)
             obs_w = obs_w * g_obs[i].unsqueeze(dim=-1)
             o = F.linear(obs, obs_w, self.obs_b)
 
-            act_w = self.act_w / torch.norm(self.act_w, dim=1, keepdim=True)
+            act_w = self.act_mu / torch.norm(self.act_mu, dim=1, keepdim=True)
             act_w = act_w * g_act[i].unsqueeze(dim=-1)
             a = F.linear(action, act_w, self.act_b)
 
             y = torch.cat([o, a], dim=-1)
             y = F.leaky_relu(y)
 
-            tgt_w = self.tgt_w / torch.norm(self.tgt_w, dim=1, keepdim=True)
+            tgt_w = self.tgt_mu / torch.norm(self.tgt_mu, dim=1, keepdim=True)
             tgt_w = tgt_w * g_tgt[i].unsqueeze(dim=-1)
             y = F.linear(y, tgt_w, self.tgt_b)
             y = F.leaky_relu(y)
 
             for j in range(self.hidden_layers):
-                hid_w = self.hidden_w[j] / torch.norm(self.hidden_w[j], dim=1, keepdim=True)
+                hid_w = self.hidden_mu[j] / torch.norm(self.hidden_mu[j], dim=1, keepdim=True)
                 hid_w = hid_w * g_hidden[j][i].unsqueeze(dim=-1)
                 y = F.linear(y, hid_w, self.hidden_b[j])
                 y = F.leaky_relu(y)
             
-            state_w = self.state_w / torch.norm(self.state_w, dim=1, keepdim=True)
+            state_w = self.state_mu / torch.norm(self.state_mu, dim=1, keepdim=True)
             state_w = state_w * g_state[i].unsqueeze(dim=-1)
             next_state = F.linear(y, state_w, self.state_b) + obs
 
-            reward_w = self.reward_w / torch.norm(self.reward_w, dim=1, keepdim=True)
+            reward_w = self.reward_mu / torch.norm(self.reward_mu, dim=1, keepdim=True)
             reward_w = reward_w * g_reward[i].unsqueeze(dim=-1)
             reward = F.linear(y, reward_w, self.reward_b)
 
-            done_w = self.done_w / torch.norm(self.done_w, dim=1, keepdim=True)
+            done_w = self.done_mu / torch.norm(self.done_mu, dim=1, keepdim=True)
             done_w = done_w * g_done[i].unsqueeze(dim=-1)
             done = F.linear(y, done_w, self.done_b)
 
@@ -237,7 +268,7 @@ class PrimaryNetwork(nn.Module):
         next_states = torch.stack(next_states, dim=1)
 
         rewards = torch.stack(rewards, dim=1)
-        #rewards = torch.tanh(rewards) * 2.0
+        rewards = torch.tanh(rewards) * 2.0
 
         dones = torch.stack(dones, dim=1)
         dones = torch.sigmoid(dones)
@@ -250,91 +281,6 @@ class PrimaryNetwork(nn.Module):
         next_states, rewards, dones = self.feedforward(obs, action, g)
         next_states = ((next_states / self.obs_scale) + 1) / 2
         next_states = next_states * (self.obs_max2 - self.obs_min2) + self.obs_min2
-        return next_states, rewards, dones
-    
-    def batch_mbrl(self, obs, action, g):
-        idx = 0
-        g_obs = g[:, idx:idx+self.hidden_units]
-        g_obs = torch.exp(g_obs)
-        
-        idx = idx + self.hidden_units
-        g_act = g[:, idx:idx+self.hidden_units]
-        g_act = torch.exp(g_act)
-        
-        idx = idx + self.hidden_units
-        g_tgt = g[:, idx:idx+self.hidden_units]
-        g_tgt = torch.exp(g_tgt)
-        
-        g_hidden = []
-        for _ in range(self.hidden_layers):
-            idx = idx + self.hidden_units
-            g_hid = g[:, idx:idx+self.hidden_units]
-            g_hid = torch.exp(g_hid)
-            g_hidden.append(g_hid)
-
-        idx = idx + self.hidden_units
-        g_state = g[:, idx:idx+self.obs_units]
-        g_state = torch.exp(g_state)
-        
-        idx = idx + self.obs_units
-        g_reward = g[:, idx:idx+1]
-        g_reward = torch.exp(g_reward)
-        
-        idx = idx + 1
-        g_done = g[:, idx:idx+1]
-        g_done = torch.exp(g_done)
-
-        next_states = []
-        rewards = []
-        dones = []
-
-        obs = (obs - self.obs_min1) / (self.obs_max1 - self.obs_min1)
-        obs = (2 * obs - 1) * self.obs_scale
-
-        obs_unsqueezed = obs.unsqueeze(dim=1)
-        obs = obs.unsqueeze(dim=-1)
-        action = action.unsqueeze(dim=-1)
-
-        obs_w = self.obs_w / torch.norm(self.obs_w, dim=1, keepdim=True)
-        obs_w = obs_w.unsqueeze(dim=0) * g_obs.unsqueeze(dim=-1)
-        o = obs_w @ obs + self.obs_b.unsqueeze(dim=0).unsqueeze(dim=-1)
-
-        act_w = self.act_w / torch.norm(self.act_w, dim=1, keepdim=True)
-        act_w = act_w.unsqueeze(dim=0) * g_act.unsqueeze(dim=-1)
-        a = act_w @ action + self.act_b.unsqueeze(dim=0).unsqueeze(dim=-1)
-
-        y = torch.cat([o, a], dim=1)
-        y = F.leaky_relu(y)
-
-        tgt_w = self.tgt_w / torch.norm(self.tgt_w, dim=1, keepdim=True)
-        tgt_w = tgt_w.unsqueeze(dim=0) * g_tgt.unsqueeze(dim=-1)
-        y = tgt_w @ y + self.tgt_b.unsqueeze(dim=0).unsqueeze(dim=-1)
-        y = F.leaky_relu(y)
-
-        for j in range(self.hidden_layers):
-            hid_w = self.hidden_w[j] / torch.norm(self.hidden_w[j], dim=1, keepdim=True)
-            hid_w = hid_w.unsqueeze(dim=0) * g_hidden[j].unsqueeze(dim=-1)
-            y = hid_w @ y + self.hidden_b[j].unsqueeze(dim=0).unsqueeze(dim=-1)
-            y = F.leaky_relu(y)
-
-        state_w = self.state_w / torch.norm(self.state_w, dim=1, keepdim=True)
-        state_w = state_w.unsqueeze(dim=0) * g_state.unsqueeze(dim=-1)
-        next_states = state_w @ y + self.state_b.unsqueeze(dim=0).unsqueeze(dim=-1)
-        next_states = next_states.squeeze(dim=-1) 
-        next_states = next_states.unsqueeze(dim=1) + obs_unsqueezed
-
-        reward_w = self.reward_w / torch.norm(self.reward_w, dim=1, keepdim=True)
-        reward_w = reward_w.unsqueeze(dim=0) * g_reward.unsqueeze(dim=-1)
-        rewards = reward_w @ y + self.reward_b.unsqueeze(dim=0).unsqueeze(dim=-1)
-
-        done_w = self.done_w / torch.norm(self.done_w, dim=1, keepdim=True)
-        done_w = done_w.unsqueeze(dim=0) * g_done.unsqueeze(dim=-1)
-        dones = done_w @ y + self.done_b.unsqueeze(dim=0).unsqueeze(dim=-1)
-        dones = torch.sigmoid(dones)
-        
-        next_states = ((next_states / self.obs_scale) + 1) / 2
-        next_states = next_states * (self.obs_max2 - self.obs_min2) + self.obs_min2
-
         return next_states, rewards, dones
     
 
@@ -361,20 +307,18 @@ class Multi_SI_BayesNetwork(nn.Module):
         self.hidden_layers = hidden_layers
 
         self.obs_scale = obs_scale
-        n_scales = hidden_units * (6 + self.hidden_layers)
-
-        self.logvar = torch.tensor([0.0 for _ in range(n_scales)]).float().to(self.device)
-        self.logvar.requires_grad = True
 
         self.primarynet = PrimaryNetwork(self.noise_dim, obs_units, act_units, obs_units, hidden_units, hidden_layers, obs_scale, device)
         self.primarynet = self.primarynet.to(device)
 
         self.set_obs_trans(obs_min, obs_max)
 
+        n_scales = hidden_units * (6 + self.hidden_layers)
+
         self.hypernet = HypernetWeight(n_scales, True, h_units=hidden_units, noise_shape=self.noise_dim)
         self.hypernet.to(device)
 
-        self.params = list(self.hypernet.parameters()) + list(self.primarynet.parameters()) + [self.logvar]
+        self.params = list(self.hypernet.parameters()) + list(self.primarynet.parameters())
         self.optim = torch.optim.Adam(self.params, lr=lr)
 
     def set_obs_trans(self, obs_min, obs_max):
@@ -397,11 +341,21 @@ class Multi_SI_BayesNetwork(nn.Module):
             z = noise_generation(num_samples, self.noise_dim, self.device)
 
         mu = self.hypernet(z)
-        logvar = self.logvar
+        logvar = torch.tensor([-2.3]).float().to(self.device)#self.hypernet.logvar
         sigma = torch.exp(logvar / 2.0)
         gen_weights = sample_n(mu, sigma)
 
         return gen_weights
+
+    def forward(self, obs, action, z):
+        g = self.hypernet(z)
+
+        mu, logvar = self.combinedhypernetwork.get_all_weights(num_samples)
+        sigma = torch.exp(logvar / 2.0)
+        w = sample_n(mu, sigma)
+        y_pred = self.primarynet(x, w)
+        #y_pred = y_pred.squeeze(dim=1)
+        return y_pred
 
     def calculate_hypernet_loss(self, hypernet, z_J, z_K, logvar):
         K = self.K + 1
@@ -424,7 +378,7 @@ class Multi_SI_BayesNetwork(nn.Module):
         w_inners = []
         mu_star_inners = []
         hypernet_ws = []
-        logvar = self.logvar
+        logvar = torch.tensor([-2.3]).float().to(self.device)#self.hypernet.logvar
         
         w, w_inner, mu_star_inner = self.calculate_hypernet_loss(self.hypernet, z_J, z_K, logvar)
         hypernet_ws.append(w)
