@@ -295,14 +295,16 @@ while total_steps_taken < args.T_max:
 
     add_to_dataset(current_state, greedy_u, rew, done, next_state, log_prob, current_steps)
     current_state = next_state.copy()
-    initial_llh = train_network(1)
-    mbrl_solver.solve_once(network, dataset_state, dataset_action, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob, verbose=True)
+    initial_llh = train_network(10)
+
+    for _ in range(10):
+        mbrl_solver.solve_once(network, dataset_state, dataset_action, dataset_rewards, dataset_next_states, dataset_dones, dataset_logprob, verbose=True)
 
     if done:
         current_steps = 0
         current_state = env.reset()
     
-    if (total_steps_taken + 1) % 1000 == 0:
+    if (total_steps_taken + 1) % 5000 == 0:
         mbrl_solver.save(mbrl_path)
         policy = mbrl_solver.make_policy()
         policy.save(os.path.join(agents_dir, f"agent_step{total_steps_taken}"))
