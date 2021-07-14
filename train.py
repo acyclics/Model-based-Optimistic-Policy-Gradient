@@ -102,7 +102,7 @@ current_beta = 0.0
 
 network = Multi_SI_BayesNetwork(obs_dim, action_dim, args.obs_scale, state_min, state_max,
                             args.network_h_units, args.network_h_layers,
-                            grad_norm=args.network_grad_norm, LLH_var=1.0,
+                            grad_norm=args.network_grad_norm, LLH_var=0.1,
                             state_LLH_var=0.1, initial_logvar=-40.0,
                             noise_dim=noise_dim, entropy=args.entropy, device=DEVICE)
 if args.resume:
@@ -265,7 +265,7 @@ def train_network():
     dataset_dones = list(dataset_dones)
     dataset_next_states = list(dataset_next_states)
 
-    network.save(net_path)
+    #network.save(net_path)
 
     return initial_llh
 
